@@ -34,6 +34,8 @@ struct context {
 
 enum procstate { UNUSED, EMBRYO, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
 
+enum priority_level {HIGH, MEDIUM, LOW};
+
 // Per-process state
 struct proc {
   uint sz;                     // Size of process memory (bytes)
@@ -50,7 +52,21 @@ struct proc {
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
+  int priority;                // priority level
+  int ticks;                   // Number of ticks process has accumulated at current process
+  int yielding;                // If non-zero, process voluntarily release CPU
 };
+
+
+typedef struct Node {
+    struct proc *process;
+    struct Node *next;
+} Node;
+
+typedef struct Queue{
+    Node *front;
+    Node *rear;
+} Queue;
 
 // Process memory is laid out contiguously, low addresses first:
 //   text

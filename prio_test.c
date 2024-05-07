@@ -2,9 +2,6 @@
 #include "stat.h"
 #include "user.h"
 
-
-
-
 void prio_test()
 { 
   // Add your own scenarios to test other scheduling points

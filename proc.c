@@ -7,6 +7,8 @@
 #include "proc.h"
 #include "spinlock.h"
 
+#define QUANTUM 4
+
 struct {
   struct spinlock lock;
   struct proc proc[NPROC];
@@ -88,6 +90,8 @@ allocproc(void)
 found:
   p->state = EMBRYO;
   p->pid = nextpid++;
+  p->priority = 0;
+  p->ticks = 0;
 
   release(&ptable.lock);
 
@@ -122,7 +126,6 @@ userinit(void)
 {
   struct proc *p;
   extern char _binary_initcode_start[], _binary_initcode_size[];
-
   p = allocproc();
   
   initproc = p;
@@ -201,6 +204,8 @@ fork(void)
   np->sz = curproc->sz;
   np->parent = curproc;
   np->nice = curproc->nice;
+  np->ticks = 0;
+  np->priority = 0;
   *np->tf = *curproc->tf;
 
   // Clear %eax so that fork returns 0 in the child.
@@ -218,6 +223,8 @@ fork(void)
   acquire(&ptable.lock);
 
   np->state = RUNNABLE;
+  curproc->state = RUNNABLE;  // Scheduling point : When new process is created
+  sched();
 
   release(&ptable.lock);
 
@@ -313,7 +320,6 @@ wait(void)
     sleep(curproc, &ptable.lock);  //DOC: wait-sleep
   }
 }
-
 //PAGEBREAK: 42
 // Per-CPU process scheduler.
 // Each CPU calls scheduler() after setting itself up.
@@ -322,39 +328,52 @@ wait(void)
 //  - swtch to start running that process
 //  - eventually that process transfers control
 //      via swtch back to the scheduler.
-void
-scheduler(void)
+void scheduler(void)
 {
   struct proc *p;
   struct cpu *c = mycpu();
   c->proc = 0;
-  
-  for(;;){
-    // Enable interrupts on this processor.
+
+  for(;;) {
     sti();
 
-    // Loop over process table looking for process to run.
     acquire(&ptable.lock);
-    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
-      if(p->state != RUNNABLE)
-        continue;
 
-      // Switch to chosen process.  It is the process's job
-      // to release ptable.lock and then reacquire it
-      // before jumping back to us.
-      c->proc = p;
-      switchuvm(p);
-      p->state = RUNNING;
+    for(int pr = HIGH; pr <= LOW; pr++) {
+      for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+        if(p->state == SLEEPING && p->chan != 0) {
+          c->proc = p;
+          switchuvm(p);
+          p->state = RUNNING;
+          swtch(&(c->scheduler), p->context);
+          switchkvm();
+          c->proc = 0;
+          continue;
+        }
+        if(p->state != RUNNABLE || p->priority != pr)
+          continue;
 
-      swtch(&(c->scheduler), p->context);
-      switchkvm();
+        // Process is found to run
+        c->proc = p;
+        switchuvm(p);
+        p->state = RUNNING;
+        swtch(&(c->scheduler), p->context);
+        switchkvm();
 
-      // Process is done running for now.
-      // It should have changed its p->state before coming back.
-      c->proc = 0;
+        // After running, handle priority adjustment and aging
+        if(p->ticks >= QUANTUM && !p->yielding) { // If full time slice is used
+          p->ticks = 0; // Reset tick counter
+          if(p->priority < LOW) p->priority++; // Demote priority
+        } else if (p->yielding && p->ticks < QUANTUM) {
+          p->ticks = 0;
+        }
+
+        c->proc = 0;
+      }
+      if(c->proc != 0) // If a process has run, break the priority loop
+        break;
     }
     release(&ptable.lock);
-
   }
 }
 
@@ -379,6 +398,7 @@ sched(void)
     panic("sched running");
   if(readeflags()&FL_IF)
     panic("sched interruptible");
+
   intena = mycpu()->intena;
   swtch(&p->context, mycpu()->scheduler);
   mycpu()->intena = intena;
@@ -390,6 +410,9 @@ yield(void)
 {
   acquire(&ptable.lock);  //DOC: yieldlock
   myproc()->state = RUNNABLE;
+  if(myproc()->ticks < 4){
+    myproc()->yielding = 1;
+  }
   sched();
   release(&ptable.lock);
 }
@@ -463,8 +486,9 @@ wakeup1(void *chan)
   struct proc *p;
 
   for(p = ptable.proc; p < &ptable.proc[NPROC]; p++)
-    if(p->state == SLEEPING && p->chan == chan)
+    if(p->state == SLEEPING && p->chan == chan){
       p->state = RUNNABLE;
+    }
 }
 
 // Wake up all processes sleeping on chan.
@@ -511,7 +535,6 @@ int nice(int value)
 		new_nice = -5;
 	p->nice = new_nice;
 	release(&ptable.lock);
-
 	return p->nice;
 }
 
